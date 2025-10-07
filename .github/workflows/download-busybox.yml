@@ -1,0 +1,75 @@
+name: Download and Extract BusyBox for All ABIs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 1"  # Every Monday at midnight UTC
+
+jobs:
+  update-busybox:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y dpkg curl grep
+
+      - name: Prepare directories
+        run: mkdir -p assets/busybox
+
+      - name: Fetch latest BusyBox version dynamically
+        id: version
+        run: |
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/b/busybox/"
+          # Get all .deb filenames, extract version number (e.g., 1.36.1)
+          LATEST=$(curl -s "$BASE_URL" | grep -oP 'busybox_\K[0-9.]+(?=_arm\.deb)' | sort -V | tail -1)
+          echo "Latest BusyBox version: $LATEST"
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Download BusyBox for each ABI
+        run: |
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/b/busybox"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          declare -A ARCHES=(
+            ["arm"]="arm"
+            ["arm64"]="aarch64"
+            ["x86"]="i686"
+            ["x86_64"]="x86_64"
+          )
+
+          for ABI in "${!ARCHES[@]}"; do
+            ARCH="${ARCHES[$ABI]}"
+            FILE="busybox_${VERSION}_${ARCH}.deb"
+            DEST="assets/busybox/${ABI}"
+            mkdir -p "$DEST"
+            echo "⬇️ Downloading $FILE..."
+            curl -L -o "$DEST/$FILE" "$BASE_URL/$FILE"
+
+            echo "📦 Extracting BusyBox binary for $ABI..."
+            dpkg-deb -x "$DEST/$FILE" "$DEST/"
+            BIN_PATH=$(find "$DEST" -type f -name "busybox" | head -n1)
+
+            if [ -n "$BIN_PATH" ]; then
+              mv "$BIN_PATH" "$DEST/busybox"
+              chmod +x "$DEST/busybox"
+              # Clean everything else except the binary
+              find "$DEST" -mindepth 1 ! -name "busybox" -exec rm -rf {} +
+              echo "✅ Extracted $ABI → $DEST/busybox"
+            else
+              echo "⚠️ BusyBox binary not found for $ABI"
+            fi
+          done
+
+      - name: Commit and push updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add assets/busybox/
+          git commit -m "Update BusyBox binaries to version ${{ steps.version.outputs.version }}" || echo "No changes to commit"
+          git push
