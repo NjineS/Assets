@@ -28,10 +28,10 @@ jobs:
         id: get_version
         run: |
           BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vim/"
-          # Find the latest ARM package (sorted by version)
-          wget -qO- "$BASE_URL" | grep -o 'vim_[0-9.]\+-[0-9]\+_arm\.deb' | sort -V | tail -n1 > latest.txt
+          # Match both 9.1.1800_arm.deb and 9.1.1800-1_arm.deb styles
+          wget -qO- "$BASE_URL" | grep -o 'vim_[0-9.\-]\+_arm\.deb' | sort -V | tail -n1 > latest.txt
           FILE=$(cat latest.txt)
-          VERSION=$(echo "$FILE" | sed -E 's/vim_([0-9.]+-[0-9]+)_.*/\1/')
+          VERSION=$(echo "$FILE" | sed -E 's/vim_([0-9.\-]+)_.*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "file=$FILE" >> $GITHUB_OUTPUT
           echo "Latest Vim version: $VERSION"
