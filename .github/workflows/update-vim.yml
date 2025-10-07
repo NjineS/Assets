@@ -1,0 +1,89 @@
+name: Update Vim
+
+on:
+  schedule:
+    - cron: "0 1 * * 0"   # every Sunday at 01:00 UTC (after BusyBox)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-vim:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget dpkg-dev grep
+
+      - name: Get latest Vim version
+        id: get_version
+        run: |
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vim/"
+          # Match versions like: vim_9.1.0500-1_aarch64.deb
+          wget -qO- "$BASE_URL" | grep -o 'vim_[0-9.]\+-[0-9]\+_arm\.deb' | sort -V | tail -n1 > latest.txt
+          FILE=$(cat latest.txt)
+          VERSION=$(echo "$FILE" | sed -E 's/vim_([0-9.]+-[0-9]+)_.*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+          echo "Latest Vim version: $VERSION"
+
+      - name: Download and extract Vim packages
+        run: |
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vim/"
+          VERSION="${{ steps.get_version.outputs.version }}"
+
+          declare -A archs=(
+            [aarch64]=arm64
+            [arm]=arm
+            [i686]=x86
+            [x86_64]=x86_64
+          )
+
+          mkdir -p assets/busybox
+
+          for arch in "${!archs[@]}"; do
+            abi="${archs[$arch]}"
+            FILE="vim_${VERSION}_${arch}.deb"
+            URL="${BASE_URL}${FILE}"
+            echo "Downloading $URL"
+            wget -q "$URL" -O "$FILE"
+
+            mkdir -p "assets/busybox/$abi"
+            dpkg-deb -x "$FILE" "assets/busybox/$abi/tmp"
+
+            # Locate and copy the Vim binary (strip /data/data/com.termux/files/usr)
+            BIN_PATH="assets/busybox/$abi/tmp/data/data/com.termux/files/usr/bin/vim"
+            if [ -f "$BIN_PATH" ]; then
+              mv "$BIN_PATH" "assets/busybox/$abi/vim"
+              chmod +x "assets/busybox/$abi/vim"
+              echo "✅ Extracted Vim for $abi"
+            else
+              echo "⚠️ Vim binary not found for $abi"
+            fi
+
+            rm -rf "assets/busybox/$abi/tmp"
+            rm -f "$FILE"
+          done
+
+      - name: Commit and push if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/busybox
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update Vim to version ${{ steps.get_version.outputs.version }}"
+            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:${{ github.ref }}
+          fi
