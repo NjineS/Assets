@@ -3,7 +3,7 @@ name: Update Vim
 on:
   schedule:
     - cron: "0 0 * * 0"   # every Sunday at midnight UTC
-  workflow_dispatch:       # allow manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -28,13 +28,13 @@ jobs:
         id: get_version
         run: |
           BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vim/"
-          # Match both 9.1.1800_arm.deb and 9.1.1800-1_arm.deb styles
-          wget -qO- "$BASE_URL" | grep -o 'vim_[0-9.\-]\+_arm\.deb' | sort -V | tail -n1 > latest.txt
+          # Match names like vim_9.1.1800_arm.deb
+          wget -qO- "$BASE_URL" | grep -o 'vim_[0-9.]\+_[a-z0-9_]\+\.deb' | sort -V | tail -n1 > latest.txt
           FILE=$(cat latest.txt)
-          VERSION=$(echo "$FILE" | sed -E 's/vim_([0-9.\-]+)_.*/\1/')
+          VERSION=$(echo "$FILE" | sed -E 's/vim_([0-9.]+)_.*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "file=$FILE" >> $GITHUB_OUTPUT
-          echo "Latest Vim version: $VERSION"
+          echo "Latest Vim version: $VERSION, file = $FILE"
 
       - name: Download and extract Vim for all ABIs
         run: |
@@ -54,10 +54,10 @@ jobs:
           for arch in "${!archs[@]}"; do
             abi="${archs[$arch]}"
             FILE="vim_${VERSION}_${arch}.deb"
-            URL="$BASE_URL$FILE"
+            URL="${BASE_URL}${FILE}"
             echo "Downloading $URL"
             wget -q "$URL" -O "$FILE" || { echo "⚠️ Failed to download $FILE"; continue; }
-            
+
             mkdir -p "assets/vim/$abi/tmp"
             dpkg-deb -x "$FILE" "assets/vim/$abi/tmp"
 
@@ -67,7 +67,7 @@ jobs:
               chmod +x "assets/vim/$abi/vim"
               echo "✅ Extracted Vim for $abi"
             else
-              echo "⚠️ Vim binary not found for $abi"
+              echo "⚠️ Vim binary not found for $abi at $BIN_PATH"
             fi
 
             rm -rf "assets/vim/$abi/tmp"
