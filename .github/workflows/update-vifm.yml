@@ -1,0 +1,110 @@
+name: Extract Vifm assets
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"   # Every Sunday 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget dpkg grep
+
+      - name: Get latest Vifm version
+        id: get_version
+        run: |
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vifm/"
+          wget -qO- "$BASE_URL" | grep -o 'vifm_[0-9.\-]\+_x86_64\.deb' | sort -V | tail -n1 > latest.txt
+          FILE=$(cat latest.txt)
+          VERSION=$(echo "$FILE" | sed -E 's/vifm_([0-9.\-]+)_.*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+          echo "Detected Vifm version: $VERSION"
+
+      - name: Download and extract Vifm for all ABIs
+        run: |
+          set -e
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/v/vifm/"
+          VERSION="${{ steps.get_version.outputs.version }}"
+
+          declare -A archs=(
+            [aarch64]=arm64-v8a
+            [arm]=armeabi-v7a
+            [i686]=x86
+            [x86_64]=x86_64
+          )
+
+          rm -rf vifm-extract
+          mkdir -p vifm-extract
+
+          failed_archs=()
+
+          for arch in "${!archs[@]}"; do
+            abi="${archs[$arch]}"
+            FILE="vifm_${VERSION}_${arch}.deb"
+            URL="${BASE_URL}${FILE}"
+
+            echo "⬇️ Downloading $URL"
+            if ! wget -q "$URL" -O "$FILE"; then
+              echo "❌ Failed to download $FILE"
+              failed_archs+=("$abi")
+              continue
+            fi
+
+            mkdir -p "vifm-extract/$abi/tmp"
+            dpkg-deb -x "$FILE" "vifm-extract/$abi/tmp"
+
+            SRC="vifm-extract/$abi/tmp/data/data/com.termux/files/usr"
+            DEST="$abi"
+
+            if [ -d "$SRC" ]; then
+              mkdir -p "$DEST"
+              cp -a "$SRC/." "$DEST/"
+              echo "✅ Extracted full Vifm assets for $abi"
+            else
+              echo "❌ Extraction failed for $abi (missing usr/)"
+              failed_archs+=("$abi")
+            fi
+
+            rm -rf "vifm-extract/$abi/tmp"
+            rm -f "$FILE"
+          done
+
+          if [ ${#failed_archs[@]} -ne 0 ]; then
+            echo "❌ Failed for architectures: ${failed_archs[*]}"
+            exit 1
+          fi
+
+          echo "✅ All Vifm ABIs extracted successfully."
+
+      - name: Commit and push extracted Vifm assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+
+          if [ -n "$(git status --porcelain arm64-v8a armeabi-v7a x86 x86_64)" ]; then
+            git add arm64-v8a armeabi-v7a x86 x86_64
+            git commit -m "Extracted full Vifm ${{ steps.get_version.outputs.version }} assets into ABI directories"
+            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
+          else
+            echo "No updates found."
+          fi
