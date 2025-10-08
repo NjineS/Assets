@@ -1,15 +1,15 @@
-name: Extract & Update BusyBox assets
+name: Extract and Release BusyBox Assets
 
 on:
   schedule:
-    - cron: "0 5 * * 0"   # Every Sunday 05:00 UTC
+    - cron: "0 8 * * 0"   # Every Sunday 08:00 UTC
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  extract:
+  extract-and-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,90 +21,78 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget dpkg grep
+          sudo apt-get install -y wget dpkg zip grep
 
-      - name: Get latest BusyBox version
-        id: get_version
-        run: |
-          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/b/busybox/"
-          wget -qO- "$BASE_URL" | grep -o 'busybox_[0-9.\-]\+_arm\.deb' | sort -V | tail -n1 > latest.txt
-          FILE=$(cat latest.txt)
-          VERSION=$(echo "$FILE" | sed -E 's/busybox_([0-9.\-]+)_.*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "file=$FILE" >> $GITHUB_OUTPUT
-          echo "Detected BusyBox version: $VERSION"
+      - name: Prepare directories
+        run: mkdir -p downloads extracted
 
-      - name: Download and extract BusyBox for all ABIs
+      - name: Extract BusyBox for all ABIs
+        id: extract
         run: |
           set -e
           BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/b/busybox/"
-          VERSION="${{ steps.get_version.outputs.version }}"
 
-          declare -A archs=(
-            [aarch64]=arm64-v8a
-            [arm]=armeabi-v7a
-            [i686]=x86
-            [x86_64]=x86_64
+          declare -A ABIS=(
+            ["aarch64"]="arm64-v8a"
+            ["arm"]="armeabi-v7a"
+            ["i686"]="x86"
+            ["x86_64"]="x86_64"
           )
 
-          rm -rf busybox-extract
-          mkdir -p busybox-extract
+          VERSION=""
 
-          failed_archs=()
+          for ARCH in "${!ABIS[@]}"; do
+            DEST="${ABIS[$ARCH]}"
+            echo "Processing $ARCH → $DEST"
 
-          for arch in "${!archs[@]}"; do
-            abi="${archs[$arch]}"
-            FILE="busybox_${VERSION}_${arch}.deb"
-            URL="${BASE_URL}${FILE}"
+            FILE=$(wget -qO- "$BASE_URL" | grep -o "busybox_[0-9.\-]\+_${ARCH}\.deb" | sort -V | tail -n1 || true)
 
-            echo "⬇️ Downloading $URL"
-            if ! wget -q "$URL" -O "$FILE"; then
-              echo "❌ Failed to download $FILE"
-              failed_archs+=("$abi")
+            if [ -z "$FILE" ]; then
+              echo "❌ No package found for $ARCH — skipping"
               continue
             fi
 
-            mkdir -p "busybox-extract/$abi/tmp"
-            dpkg-deb -x "$FILE" "busybox-extract/$abi/tmp"
+            echo "⬇️ Downloading $FILE"
+            wget -q "${BASE_URL}${FILE}" -O "downloads/$FILE"
 
-            SRC="busybox-extract/$abi/tmp/data/data/com.termux/files/usr"
-            DEST="$abi"
+            mkdir -p "tmp-$ARCH"
+            dpkg-deb -x "downloads/$FILE" "tmp-$ARCH"
 
-            if [ -d "$SRC" ]; then
-              mkdir -p "$DEST"
-              cp -a "$SRC/." "$DEST/"
-              echo "✅ Extracted full BusyBox assets for $abi"
-            else
-              echo "❌ Extraction failed for $abi (missing usr/)"
-              failed_archs+=("$abi")
+            SRC="tmp-${ARCH}/data/data/com.termux/files/usr"
+            if [ ! -d "$SRC" ]; then
+              echo "❌ Extraction failed for $ARCH — $SRC missing"
+              exit 1
             fi
 
-            rm -rf "busybox-extract/$abi/tmp"
-            rm -f "$FILE"
+            mkdir -p "extracted/$DEST"
+            cp -a "$SRC/." "extracted/$DEST/"
+            echo "✅ Extracted BusyBox for $ARCH"
+
+            VERSION=$(echo "$FILE" | sed -E 's/busybox_([0-9.\-]+)_.*/\1/')
+            rm -rf "tmp-$ARCH"
           done
 
-          if [ ${#failed_archs[@]} -ne 0 ]; then
-            echo "❌ Failed for architectures: ${failed_archs[*]}"
-            exit 1
-          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          echo "✅ All BusyBox ABIs extracted successfully."
+      - name: Compress ABI folders
+        run: |
+          cd extracted
+          for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [ -d "$ABI" ]; then
+              zip -r "../busybox-${ABI}.zip" "$ABI"
+              echo "📦 Created busybox-${ABI}.zip"
+            fi
+          done
 
-      - name: Commit and push extracted BusyBox assets
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "BusyBox (latest)"
+          tag_name: "busybox-latest"
+          files: "busybox-*.zip"
+          body: |
+            This release contains BusyBox binaries extracted from Termux packages for all supported ABIs.
+            Version: `${{ steps.extract.outputs.version }}`
+            Source: [Termux BusyBox packages](https://packages.termux.dev/apt/termux-main/pool/main/b/busybox/)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin main
-          git checkout main
-          git reset --hard origin/main
-
-          if [ -n "$(git status --porcelain arm64-v8a armeabi-v7a x86 x86_64)" ]; then
-            git add arm64-v8a armeabi-v7a x86 x86_64
-            git commit -m "Extracted full BusyBox ${{ steps.get_version.outputs.version }} assets into ABI directories"
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
-          else
-            echo "No updates found."
-          fi
